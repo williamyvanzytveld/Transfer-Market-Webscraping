@@ -1,0 +1,345 @@
+---
+title: "All Goals Scored by Individual Footballers"
+author: "William VanZytveld"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE, message = FALSE, echo = FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+# Libraries in Use
+```{r}
+library(tidyverse)
+library(lubridate)
+library(rvest)
+library(robotstxt)
+library(zoo)
+library(pander)
+library(remotes)
+library(altcheckr)
+```
+
+
+# Data Collection
+
+## Web Scraping
+
+```{r}
+webscrape_transfermarket <- function(link){
+  player_goals <- read_html(link)
+  player_goals <- player_goals %>% 
+  html_nodes(".responsive-table") %>% 
+  html_table() %>% 
+  as.data.frame()
+}
+
+lionel_mezzi <- read_html("https://www.transfermarkt.us/lionel-messi/alletore/spieler/28003/saison//verein/0/liga/0/wettbewerb//pos/0/trainer_id/0/minute/0/torart/0/plus/1") %>%
+  html_nodes(".responsive-table") %>%
+  html_table() %>%
+  as.data.frame()
+
+quickview(lionel_mezzi, 10)
+```
+
+
+
+# Loading and Cleaning Data
+
+```{r}
+clean_data <- function(player_name, link){
+  player <- webscrape_transfermarket(link)
+  
+  player_bday <- read_html(link) %>% 
+  html_nodes(".data-header__content") %>% 
+  html_text2() %>% 
+  noquote() %>% 
+  .[4] %>% 
+  str_remove("\\)")
+  
+player %>%
+  slice(1:(n() - 1)) %>%  #removes last row
+  select(-c(Var.16:Var.18)) %>% 
+  mutate_all(na_if,"") %>% 
+  mutate(player = player_name,
+         competition = str_remove(competition, "Season")) %>% 
+  separate(competition, into = c("beg_year", "end_year"), sep = "/") %>% 
+  mutate(beg_year = as.numeric(beg_year) + 2000,
+         end_year = as.numeric(end_year) + 2000)  %>% 
+  fill(c("beg_year", "end_year", "Date"), .direction = "down") %>%
+  filter(is.na(Venue) |
+       str_detect(Venue, regex("Season | Matches", ignore_case = TRUE), negate = TRUE)) %>% 
+  mutate(season = as.factor(paste(beg_year,"-",end_year)),
+         game_date = parse_date_time2(`Date`, "mdy", cutoff_2000 = 2000),#ensuring years after 2000 are correctly identified in the right century.
+         match_year = lubridate::year(ymd(Date)), #grab year from Date
+         match_month = lubridate::month(ymd(Date)), #grab month from Date
+         match_week = lubridate::week(ymd(Date)), #grab week number from Date
+         match_wday = lubridate::wday(ymd(Date)),
+         player_bday = player_bday,
+         player_team_position_after = str_extract(For.1, "\\d")) %>% #grab weekday from Date
+  separate(player_bday, into = c("bmonth", "bday", "byear"), sep = c(" ", ",")) %>%
+  mutate(player_bday = make_date(as.numeric(byear),
+                               as.numeric(factor(bmonth, levels = month.abb)),
+                               as.numeric(str_remove(bday, ",")))) %>% 
+  mutate(age_score = trunc(as.numeric(difftime(game_date, player_bday, units = "days")) / 365.25)) %>% 
+  separate(Opponent.1, into = c("Opponent", "Opponent Position After"), sep = "\\(") %>% 
+  mutate(`Opponent Position After` = str_remove(`Opponent Position After`, "[.)]+")) %>% 
+  separate(`Minute`, into = c("regular", "stoppage"), sep = "\\'") %>% 
+  mutate(stoppage = str_remove(stoppage, "\\+")) %>% 
+  fill(c(competition.1:For,
+         Opponent,
+         Result,
+         Pos.,
+         match_year:age_score), .direction = "down") %>%
+  mutate(AET = ifelse(str_detect(Result, "AET"), "Yes", "No"),
+         Result = str_remove(Result, "AET")) %>% 
+  separate(Result, into = c("home_end_goals", "away_end_goals"), sep = ":", remove = FALSE) %>% 
+  mutate(player_team_goals = as.numeric(case_when(Venue == "H" ~ home_end_goals,
+                                       Venue == "A" ~ away_end_goals)),
+         opponent_team_goals = as.numeric(case_when(Venue == "H" ~ away_end_goals,
+                                         Venue == "A" ~ home_end_goals)),
+         goal_difference = player_team_goals - opponent_team_goals,
+         player_team_result = case_when(goal_difference > 0 ~ "Win",
+                                        goal_difference < 0 ~ "Loss",
+                                        goal_difference == 0 ~ "Draw")) %>% 
+  select(season,
+         competition = competition.1,
+         matchday = Matchday,
+         game_date = Date,
+         venue = Venue,
+         player_team = For,
+         opponent = Opponent,
+         result = Result,
+         goal_type = Type.of.goal,
+         assist = Goal.assist,
+         brings_it_to = At.score,
+         regular,
+         stoppage,
+         AET,
+         player_team_position_before = `For.1`,
+         player_team_position_after,
+         opponent_position_after = `Opponent Position After`,
+         match_position = Pos.,
+         match_year:match_wday,
+         player,
+         player_bday,
+         age_score)
+}
+```
+
+## Load Datasets according to player website profiles
+
+```{r}
+
+names <- c("Lionel Messi", "Cristiano Ronaldo", "Erling Haaland", "Kylian Mbappé")
+
+player_urls <- c("https://www.transfermarkt.us/lionel-messi/alletore/spieler/28003/saison//verein/0/liga/0/wettbewerb//pos/0/trainer_id/0/minute/0/torart/0/plus/1",
+                 "https://www.transfermarkt.us/cristiano-ronaldo/alletore/spieler/8198/saison//verein/0/liga/0/wettbewerb//pos/0/trainer_id/0/minute/0/torart/0/plus/1",
+                 "https://www.transfermarkt.us/erling-haaland/alletore/spieler/418560/saison//verein/0/liga/0/wettbewerb//pos/0/trainer_id/0/minute/0/torart/0/plus/1",
+                 "https://www.transfermarkt.us/kylian-mbappe/alletore/spieler/342229/saison//verein/0/liga/0/wettbewerb//pos/0/trainer_id/0/minute/0/torart/0/plus/1")
+#
+# view(names)
+# view(player_urls)
+#
+#
+#
+# totally_new_function <- function(names, link){
+#   for(i in 1:length(names)){
+#   clean_data(get(names[i]), get(link[i]))
+#   }
+# }
+#
+#
+# totally_new_function(names, player_urls)
+
+
+lionel_messi <- clean_data("Lionel Messi", "https://www.transfermarkt.us/lionel-messi/alletore/spieler/28003/saison//verein/0/liga/0/wettbewerb//pos/0/trainer_id/0/minute/0/torart/0/plus/1")
+
+cristiano_ronaldo <- clean_data("Cristiano Ronaldo", "https://www.transfermarkt.us/cristiano-ronaldo/alletore/spieler/8198/saison//verein/0/liga/0/wettbewerb//pos/0/trainer_id/0/minute/0/torart/0/plus/1")
+
+erling_haaland <- clean_data("Erling Haaland", "https://www.transfermarkt.us/erling-haaland/alletore/spieler/418560/saison//verein/0/liga/0/wettbewerb//pos/0/trainer_id/0/minute/0/torart/0/plus/1")
+
+kylian_mbappe <- clean_data("Kylian Mbappé", "https://www.transfermarkt.us/kylian-mbappe/alletore/spieler/342229/saison//verein/0/liga/0/wettbewerb//pos/0/trainer_id/0/minute/0/torart/0/plus/1")
+
+pedri_gonzalez <- clean_data("Pedri González", "https://www.transfermarkt.us/pedri/alletore/spieler/683840/saison//verein/0/liga/0/wettbewerb//pos/0/trainer_id/0/minute/0/torart/0/plus/1")
+
+sergio_busquets <- clean_data("Sergio Busquets", "https://www.transfermarkt.us/sergio-busquets/alletore/spieler/65230/saison//verein/0/liga/0/wettbewerb//pos/0/trainer_id/0/minute/0/torart/0/plus/1")
+
+robert_lewandowski <- clean_data("Robert Lewandowski", "https://www.transfermarkt.us/robert-lewandowski/alletore/spieler/38253/saison//verein/0/liga/0/wettbewerb//pos/0/trainer_id/0/minute/0/torart/0/plus/1")
+
+karim_benzema <- clean_data("Karim Benzema", "https://www.transfermarkt.us/karim-benzema/alletore/spieler/18922/saison//verein/0/liga/0/wettbewerb//pos/0/trainer_id/0/minute/0/torart/0/plus/1")
+
+harry_kane <- clean_data("Harry Kane", "https://www.transfermarkt.us/harry-kane/alletore/spieler/132098/saison//verein/0/liga/0/wettbewerb//pos/0/trainer_id/0/minute/0/torart/0/plus/1")
+
+mohamed_salah <- clean_data("Mohamed Salah", "https://www.transfermarkt.us/mohamed-salah/alletore/spieler/148455/saison//verein/0/liga/0/wettbewerb//pos/0/trainer_id/0/minute/0/torart/0/plus/1")
+
+
+clean_data("Heung-min Son", "https://www.transfermarkt.us/heung-min-son/alletore/spieler/91845/saison//verein/0/liga/0/wettbewerb//pos/0/trainer_id/0/minute/0/torart/0/plus/1")
+
+quickview(lionel_messi, 10)
+```
+
+
+
+# Sample Player Analysis:
+
+## Type of Goal Frequency Table
+
+```{r}
+frequency_table <- function(dataset, group_variable, arrange_variable){
+  dataset %>% 
+  group_by(get(group_variable)) %>% 
+  count() %>% 
+  arrange(desc(n))
+}
+
+total_goals <- function(dataset){
+  dataset %>% 
+    count()
+}
+
+frequency_table_list <- function(dataset){
+  age_score <- frequency_table(dataset, "age_score")
+  goal_type <- frequency_table(dataset, "goal_type")
+  competition <- frequency_table(dataset, "competition")
+  venue <- frequency_table(dataset, "venue")
+  match_position <- frequency_table(dataset, "match_position")
+  total <- total_goals(dataset)
+return(list(age_score,
+       goal_type,
+       competition,
+       venue,
+       match_position,
+       total))
+}
+```
+
+Test on players:
+```{r}
+frequency_table_list(lionel_messi)
+frequency_table_list(cristiano_ronaldo)
+frequency_table_list(kylian_mbappe)
+frequency_table_list(erling_haaland)
+frequency_table_list(robert_lewandowski)
+frequency_table_list(karim_benzema)
+frequency_table_list(harry_kane)
+frequency_table_list(mohamed_salah)
+```
+
+
+# Data Visualizations
+
+```{r}
+four_players %>%
+  filter(age_score < 21) %>% 
+  group_by(player) %>% 
+  count()
+```
+
+
+
+```{r}
+link <- "https://www.transfermarkt.us/robert-lewandowski/alletore/spieler/38253/saison//verein/0/liga/0/wettbewerb//pos/0/trainer_id/0/minute/0/torart/0/plus/1"
+
+robert <- webscrape_transfermarket(link)
+
+player_bday <- read_html(link) %>% 
+  html_nodes(".data-header__content") %>% 
+  html_text2() %>% 
+  noquote() %>% 
+  .[4] %>% 
+  str_remove("\\)")
+  
+robert <- robert %>%
+  slice(1:(n() - 1)) %>%  #removes last row
+  select(-c(Var.16:Var.18)) %>% 
+  mutate_all(na_if,"") %>% 
+  mutate(player = "Robert",
+         competition = str_remove(competition, "Season")) %>% 
+  separate(competition, into = c("beg_year", "end_year"), sep = "/") %>% 
+  mutate(beg_year = as.numeric(beg_year) + 2000,
+         end_year = as.numeric(end_year) + 2000)  %>% 
+  fill(c("beg_year", "end_year", "Date"), .direction = "down") %>%
+  filter(is.na(Venue) |
+       str_detect(Venue, regex("Season | Matches", ignore_case = TRUE), negate = TRUE)) %>% 
+  mutate(season = as.factor(paste(beg_year,"-",end_year)),
+         game_date = parse_date_time2(`Date`, "mdy", cutoff_2000 = 2000),#ensuring years after 2000 are correctly identified in the right century.
+         match_year = lubridate::year(ymd(Date)), #grab year from Date
+         match_month = lubridate::month(ymd(Date)), #grab month from Date
+         match_week = lubridate::week(ymd(Date)), #grab week number from Date
+         match_wday = lubridate::wday(ymd(Date)),
+         player_bday = player_bday,
+         player_team_position_after = str_extract(For.1, "\\d")) %>% #grab weekday from Date
+  separate(player_bday, into = c("bmonth", "bday", "byear"), sep = c(" ", ",")) %>%
+  mutate(player_bday = make_date(as.numeric(byear),
+                               as.numeric(factor(bmonth, levels = month.abb)),
+                               as.numeric(str_remove(bday, ",")))) %>% 
+  mutate(age_score = trunc(as.numeric(difftime(game_date, player_bday, units = "days")) / 365.25)) %>% 
+  separate(Opponent.1, into = c("Opponent", "Opponent Position After"), sep = "\\(") %>% 
+  mutate(`Opponent Position After` = str_remove(`Opponent Position After`, "[.)]+")) %>% 
+  separate(`Minute`, into = c("regular", "stoppage"), sep = "\\'") %>% 
+  mutate(stoppage = str_remove(stoppage, "\\+")) %>% 
+  fill(c(competition.1:For,
+         Opponent,
+         Result,
+         Pos.,
+         match_year:age_score), .direction = "down") %>%
+  mutate(AET = ifelse(str_detect(Result, "AET"), "Yes", "No"),
+         Result = str_remove(Result, "AET")) %>% 
+  separate(Result, into = c("home_end_goals", "away_end_goals"), sep = ":", remove = FALSE) %>% 
+  mutate(player_team_goals = as.numeric(case_when(Venue == "H" ~ home_end_goals,
+                                       Venue == "A" ~ away_end_goals)),
+         opponent_team_goals = as.numeric(case_when(Venue == "H" ~ away_end_goals,
+                                         Venue == "A" ~ home_end_goals)),
+         goal_difference = player_team_goals - opponent_team_goals,
+         player_team_result = case_when(goal_difference > 0 ~ "Win",
+                                        goal_difference < 0 ~ "Loss",
+                                        goal_difference == 0 ~ "Draw")) %>% 
+  select(season,
+         competition = competition.1,
+         matchday = Matchday,
+         game_date = Date,
+         venue = Venue,
+         player_team = For,
+         opponent = Opponent,
+         result = Result,
+         goal_type = Type.of.goal,
+         assist = Goal.assist,
+         brings_it_to = At.score,
+         regular,
+         stoppage,
+         AET,
+         player_team_position_after ,
+         opponent_position_after = `Opponent Position After`,
+         match_position = Pos.,
+         match_year:match_wday,
+         player,
+         age_score)
+
+quickview(robert, 10)
+
+link <- "https://www.transfermarkt.us/kylian-mbappe/alletore/spieler/342229/saison//verein/0/liga/0/wettbewerb//pos/0/trainer_id/0/minute/0/torart/0/plus/1"
+
+
+read_html(link) %>% 
+  html_nodes("a") %>% 
+  html_attr(.,"title")
+
+
+read_html(link) %>% 
+  html_nodes("img") %>% 
+  html_attr("alt")
+```
+
+```{r}
+
+myurl <- read_html ("http://eyeonhousing.org/2012/11/gdp-growth-in-the-third-quarter-improved-but-still-slow/")
+mynode <- myurl %>% html_node("img.wp-image-5984")
+link <- html_attr(mynode, "src")
+download.file(url = link,destfile = "test.jpg")
+
+```
+
+
+
